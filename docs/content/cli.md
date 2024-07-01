@@ -569,6 +569,7 @@ opa eval <query> [flags]
       --timeout duration                                          set eval timeout (default unlimited)
   -u, --unknowns stringArray                                      set paths to treat as unknown during partial evaluation (default [input])
       --v1-compatible                                             opt-in to OPA features and behaviors that will be enabled by default in a future OPA v1.0 release
+      --var-values                                                show local variable values in pretty trace output
 ```
 
 ____
@@ -598,8 +599,17 @@ the OPA configuration) against each input file. This can be overridden by
 specifying the --decision argument and pointing at a specific policy decision,
 e.g., opa exec --decision /foo/bar/baz ...
 
+
 ```
 opa exec <path> [<path> [...]] [flags]
+```
+
+### Examples
+
+```
+  Loading input from stdin:
+    generate exec [<path> [...]] --stdin-input [flags]
+
 ```
 
 ### Options
@@ -618,6 +628,7 @@ opa exec <path> [<path> [...]] [flags]
       --log-timestamp-format string          set log timestamp format (OPA_LOG_TIMESTAMP_FORMAT environment variable)
       --set stringArray                      override config values on the command line (use commas to specify multiple values)
       --set-file stringArray                 override config values with files on the command line (use commas to specify multiple values)
+  -I, --stdin-input                          read input document from stdin rather than a static file
       --timeout duration                     set exec timeout with a Go-style duration, such as '5m 30s'. (default unlimited)
       --v1-compatible                        opt-in to OPA features and behaviors that will be enabled by default in a future OPA v1.0 release
 ```
@@ -1129,6 +1140,7 @@ opa test <path> [path [...]] [flags]
       --threshold float                    set coverage threshold and exit with non-zero status if coverage is less than threshold %
       --timeout duration                   set test timeout (default 5s, 30s when benchmarking)
       --v1-compatible                      opt-in to OPA features and behaviors that will be enabled by default in a future OPA v1.0 release
+      --var-values                         show local variable values in test output
   -v, --verbose                            set verbose reporting mode
   -w, --watch                              watch command line files for changes
 ```

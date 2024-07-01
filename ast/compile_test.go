@@ -1775,6 +1775,21 @@ func TestCompilerCheckTypes(t *testing.T) {
 	assertNotFailed(t, c)
 }
 
+// Regression test for GH issue #6790
+func TestCompilerCheckEveryWithNestedDomainCalls(t *testing.T) {
+	c := NewCompiler()
+	c.Modules = map[string]*Module{"test": MustParseModule(`package test
+import rego.v1
+
+x if {
+	every p in [1 / 2] {
+		p == true
+	}
+}`)}
+	compileStages(c, c.checkTypes)
+	assertNotFailed(t, c)
+}
+
 func TestCompilerCheckRuleConflicts(t *testing.T) {
 
 	c := getCompilerWithParsedModules(map[string]string{
@@ -2567,7 +2582,7 @@ func TestCompilerRewriteExprTerms(t *testing.T) {
 				f(__local0__[0]) { true; __local0__ = [1] }`,
 		},
 		{
-			note: "every: domain",
+			note: "every: domain (array)",
 			module: `
 			package test
 
@@ -2576,6 +2591,79 @@ func TestCompilerRewriteExprTerms(t *testing.T) {
 			package test
 
 			p { __local2__ = [1, 2]; every __local0__, __local1__ in __local2__ { __local1__ } }`,
+		},
+		{
+			note: "every: domain (call)",
+			module: `
+			package test
+
+			p { every x in numbers.range(1, 3) { x } }`,
+			expected: `
+			package test
+
+			p = true {
+				numbers.range(1, 3, __local3__)
+				__local2__ = __local3__
+				every __local0__, __local1__ in __local2__ {
+					__local1__
+				}
+			}`,
+		},
+		{
+			note: "every: domain (nested calls)",
+			module: `
+			package test
+
+			p { every x in numbers.range(1 + 2, 3 * 4) { x } }`,
+			expected: `
+			package test
+
+			p = true { 
+				plus(1, 2, __local3__)
+				mul(3, 4, __local4__)
+				numbers.range(__local3__, __local4__, __local5__)
+				__local2__ = __local5__
+				every __local0__, __local1__ in __local2__ { 
+					__local1__ 
+				}
+			}`,
+		},
+		// Regression test for GH issue #6790
+		{
+			note: "every: domain (array with call)",
+			module: `
+			package test
+
+			p { every x in [1 / 2, "foo", abs(-1)] { x } }`,
+			expected: `
+			package test
+
+			p = true { 
+				div(1, 2, __local3__)
+				abs(-1, __local4__)
+				__local2__ = [__local3__, "foo", __local4__]
+				every __local0__, __local1__ in __local2__ {
+					__local1__
+				} 
+			}`,
+		},
+		{
+			note: "every: domain (nested array with call)",
+			module: `
+			package test
+
+			p { every x in [1 / 2, ["foo", abs(-1)]] { x } }`,
+			expected: `
+			package test
+
+			p = true { 
+				div(1, 2, __local3__)
+				abs(-1, __local4__)
+				__local2__ = [__local3__, ["foo", __local4__]]
+				every __local0__, __local1__ in __local2__ { 
+					__local1__ 
+				} 
+			}`,
 		},
 	}
 
@@ -6634,7 +6722,9 @@ func TestCompilerRewriteDynamicTerms(t *testing.T) {
 		{`call_func { f(input, "foo") } f(x,y) { x[y] }`, `__local2__ = input; data.test.f(__local2__, "foo")`},
 		{`call_func2 { f(input.foo, "foo") } f(x,y) { x[y] }`, `__local2__ = input.foo; data.test.f(__local2__, "foo")`},
 		{`every_domain { every _ in str { true } }`, `__local1__ = data.test.str; every __local0__, _ in __local1__ { true }`},
-		{`every_domain_call { every _ in numbers.range(1, 10) { true } }`, `numbers.range(1, 10, __local1__); every __local0__, _ in __local1__ { true }`},
+		{`every_domain_array { every _ in [1, 2, 3] { true } }`, `__local1__ = [1, 2, 3]; every __local0__, _ in __local1__ { true }`},
+		{`every_domain_call { every _ in numbers.range(1, 10) { true } }`, `numbers.range(1, 10, __local2__); __local1__ = __local2__; every __local0__, _ in __local1__ { true }`},
+		{`every_domain_array_w_calls { every _ in [1 / 2, "foo", abs(-1)] { true } }`, `div(1, 2, __local2__); abs(-1, __local3__); __local1__ = [__local2__, "foo", __local3__]; every __local0__, _ in __local1__ { true }`},
 		{`every_body { every _ in [] { [str] } }`,
 			`__local1__ = []; every __local0__, _ in __local1__ { __local2__ = data.test.str; [__local2__] }`},
 	}
@@ -10677,5 +10767,167 @@ deny {
 	c.Compile(map[string]*Module{"testMod": m})
 	if c.Failed() {
 		t.Fatal(c.Errors)
+	}
+}
+
+func TestCompilerRewriteTestRulesForTracing(t *testing.T) {
+	tests := []struct {
+		note    string
+		rewrite bool
+		module  string
+		exp     string
+	}{
+		{
+			note: "ref comparison, no rewrite",
+			module: `package test
+import rego.v1
+
+a := 1
+b := 2
+
+test_something if {
+	a == b
+}`,
+			exp: `package test
+        
+a := 1 { true }
+b := 2 { true }
+
+test_something = true { 
+	data.test.a = data.test.b 
+}`,
+		},
+		{
+			note:    "ref comparison, rewrite",
+			rewrite: true,
+			module: `package test
+import rego.v1
+
+a := 1
+b := 2
+
+test_something if {
+	a == b
+}`,
+			// When the test fails on '__local0__ = __local1__', the values for 'a' and 'b' are captured in local bindings,
+			// accessible by the tracer.
+			exp: `package test
+        
+a := 1 { true }
+b := 2 { true }
+
+test_something = true { 
+	__local0__ = data.test.a
+	__local1__ = data.test.b
+	__local0__ = __local1__
+}`,
+		},
+		{
+			note:    "ref comparison, not-stmt, rewrite",
+			rewrite: true,
+			module: `package test
+import rego.v1
+
+a := 1
+b := 2
+
+test_something if {
+	not a == b
+}`,
+			// We don't break out local vars from a not-stmt, as that would change the semantics of the rule.
+			exp: `package test
+
+a := 1 { true }
+b := 2 { true }
+
+test_something = true { 
+	not data.test.a = data.test.b
+}`,
+		},
+		{
+			note: "ref comparison, inside every-stmt, no rewrite",
+			module: `package test
+import rego.v1
+
+a := 1
+b := 2
+l := [1, 2, 3]
+
+test_something if {
+	every x in l {
+		a < b + x
+	}
+}`,
+			exp: `package test
+import future.keywords
+
+a := 1 { true }
+b := 2 { true }
+l := [1, 2, 3] { true }
+
+test_something = true { 
+	__local2__ = data.test.l
+	every __local0__, __local1__ in __local2__ { 
+		__local4__ = data.test.b
+		plus(__local4__, __local1__, __local3__)
+		__local5__ = data.test.a
+		lt(__local5__, __local3__) 
+	} 
+}`,
+		},
+		{
+			note:    "ref comparison, inside every-stmt, rewrite",
+			rewrite: true,
+			module: `package test
+import rego.v1
+
+a := 1
+b := 2
+l := [1, 2, 3]
+
+test_something if {
+	every x in l {
+		a < b + x
+	}
+}`,
+			// When tests contain an 'every' statement, we're interested in the circumstances that made the every fail,
+			// so it's body is rewritten.
+			exp: `package test
+import future.keywords
+        
+a := 1 { true }
+b := 2 { true }
+l := [1, 2, 3] { true }
+
+test_something = true { 
+	__local2__ = data.test.l; 
+	every __local0__, __local1__ in __local2__ { 
+		__local4__ = data.test.b
+		plus(__local4__, __local1__, __local3__)
+		__local5__ = data.test.a
+		lt(__local5__, __local3__) 
+	} 
+}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			ms := map[string]string{
+				"test.rego": tc.module,
+			}
+			c := getCompilerWithParsedModules(ms).
+				WithRewriteTestRules(tc.rewrite)
+
+			compileStages(c, c.rewriteTestRuleEqualities)
+			assertNotFailed(t, c)
+
+			result := c.Modules["test.rego"]
+			exp := MustParseModule(tc.exp)
+			exp.Imports = nil // We strip the imports since the compiler will too
+			if result.Compare(exp) != 0 {
+				t.Fatalf("\nExpected:\n\n%v\n\nGot:\n\n%v", exp, result)
+			}
+		})
 	}
 }
